@@ -329,6 +329,13 @@ export function transformTomlData(data: Record<string, unknown>): Record<string,
       result[targetKey] = transformPlainObject(value);
     } else if (targetKey === 'mcp' && isPlainObject(value)) {
       result[targetKey] = transformPlainObject(value);
+    } else if (targetKey === 'aliases' && isPlainObject(value)) {
+      // [aliases] is a flat string→string map (alias name → expansion target).
+      // Each value is a TOML basic string (or quoted) — pass them through
+      // verbatim. No nested keys to camelCase, so a shallow clone is enough.
+      result[targetKey] = Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, typeof v === 'string' ? v : String(v)]),
+      );
     } else if (!isPlainObject(value)) {
       result[targetKey] = value;
     }

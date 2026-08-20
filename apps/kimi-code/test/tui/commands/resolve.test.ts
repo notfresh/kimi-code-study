@@ -339,4 +339,49 @@ describe('slash command busy helpers', () => {
       reason: 'streaming',
     });
   });
+
+  // ---- User-defined aliases ([aliases] in config.toml) ----
+
+  it('rewrites a user alias to its target builtin (no args)', () => {
+    const aliasMap = new Map([
+      ['ss', 'sessions'],
+      ['mm3', 'model minimax-cn-coding-plan/MiniMax-M3'],
+    ]);
+    expect(resolve('/ss', { aliasMap })).toMatchObject({
+      kind: 'builtin',
+      name: 'sessions',
+      args: '',
+    });
+    expect(resolve('/mm3', { aliasMap })).toMatchObject({
+      kind: 'builtin',
+      name: 'model',
+      args: 'minimax-cn-coding-plan/MiniMax-M3',
+    });
+  });
+
+  it('appends user-supplied args after the alias expansion (git-style)', () => {
+    const aliasMap = new Map([['mm3', 'model minimax-cn-coding-plan/MiniMax-M3']]);
+    expect(resolve('/mm3 --thinking high', { aliasMap })).toMatchObject({
+      kind: 'builtin',
+      name: 'model',
+      args: 'minimax-cn-coding-plan/MiniMax-M3 --thinking high',
+    });
+  });
+
+  it('does not rewrite aliases when aliasMap is undefined or empty', () => {
+    expect(resolve('/ss', {})).toMatchObject({ kind: 'message' });
+    expect(resolve('/ss', { aliasMap: new Map() })).toMatchObject({ kind: 'message' });
+  });
+
+  it('ignores cycles in user aliases (single-hop rewrite only)', () => {
+    const aliasMap = new Map([
+      ['cycle-a', 'cycle-b'],
+      ['cycle-b', 'cycle-a'],
+    ]);
+    // The first hop rewrites /cycle-a → /cycle-b, then /cycle-b falls through
+    // (no alias expansion on the second hop); neither name is a builtin, so
+    // the result is `message` — never a stack overflow.
+    const result = resolve('/cycle-a', { aliasMap });
+    expect(result.kind).toBe('message');
+  });
 });

@@ -163,6 +163,7 @@ export * from '#/kosong/provider/providerDefinition';
 export * from '#/kosong/provider/protocolAdapterRegistry';
 import '#/app/skillCatalog/configSection';
 import '#/app/agentIdentity/configSection';
+import '#/app/alias/configSection';
 export * from '#/app/agentIdentity/configSection';
 export * from '#/app/agentIdentity/agentIdentity';
 export * from '#/app/agentIdentity/agentIdentityService';

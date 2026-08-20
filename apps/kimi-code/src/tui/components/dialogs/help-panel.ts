@@ -123,6 +123,14 @@ export class HelpPanelComponent extends Container implements Focusable {
         return `    ${slashColor(label.padEnd(cmdWidth))}  ${dim(cmd.description)}`;
       }),
       '',
+      // Section: user aliases (only shown when at least one alias is loaded)
+      ...(sortedCmds.some((c) => c.description.startsWith('alias:'))
+        ? [
+            `  ${currentTheme.bold('User aliases')}`,
+            `    ${dim('Defined in')} ${slashColor('~/.kimi-code/config.toml')} ${dim('under')} ${slashColor('[aliases]')} ${dim('— git-style concat: /<alias> <args> → /<target> <args>. One-hop rewrite only, so cycles resolve to a fallback message instead of looping.')}`,
+          ]
+        : []),
+      '',
       accent('─'.repeat(width)),
     ];
 

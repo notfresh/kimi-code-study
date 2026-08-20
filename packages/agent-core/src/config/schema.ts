@@ -369,6 +369,25 @@ export const KimiConfigSchema = z.object({
   modelCatalog: ModelCatalogConfigSchema.optional(),
   experimental: ExperimentalConfigSchema.optional(),
   telemetry: z.boolean().optional(),
+  /**
+   * User-defined slash-command aliases. The key is the alias name (e.g. "/ss")
+   * and the value is the slash command it expands to (e.g. "/sessions"). When
+   * the user types `/ss` and `aliases["/ss"]` exists, the input is rewritten
+   * to `/sessions <args>` before resolution — git-style left-args concat.
+   *
+   * Right-hand side is a plain string: it is fed back into the slash parser,
+   * not a shell, so no character restrictions are needed.
+   */
+  aliases: z
+    .record(
+      // Slash-command name without the leading "/", e.g. "ss", "mm3",
+      // "skill:review-pr". Runtime normalizes by prepending "/".
+      z.string().regex(/^[a-zA-Z0-9_:/.-]+$/),
+      // Expansion target (also without leading "/"), e.g. "sessions",
+      // "model MiniMax-M3 --provider minimax-cn". User's args are appended.
+      z.string().min(1),
+    )
+    .optional(),
   raw: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -418,6 +437,12 @@ export const KimiConfigPatchSchema = z
     modelCatalog: ModelCatalogConfigPatchSchema.optional(),
     experimental: ExperimentalConfigPatchSchema.optional(),
     telemetry: z.boolean().optional(),
+    aliases: z
+      .record(
+        z.string().regex(/^[a-zA-Z0-9_:/.-]+$/),
+        z.string().min(1),
+      )
+      .optional(),
   })
   .strict();
 

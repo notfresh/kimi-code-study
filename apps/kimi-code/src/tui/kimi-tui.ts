@@ -319,6 +319,10 @@ export class KimiTUI {
   readonly skillCommandMap = new Map<string, string>();
   private pluginCommands: readonly KimiSlashCommand[] = [];
   readonly pluginCommandMap = new Map<string, string>();
+  // User-defined `[aliases]` from config.toml. Repopulated by refreshAliases()
+  // (called on start and on `/reload`).
+  readonly aliasMap = new Map<string, string>();
+  private aliasCommands: readonly KimiSlashCommand[] = [];
   private readonly imageStore = new ImageAttachmentStore();
   // Detected lazily in startBackgroundFdAutocomplete() — detection spawns
   // `fd --version`, which must not happen before the workspace trust gate:
@@ -471,7 +475,7 @@ export class KimiTUI {
     const builtins = sortSlashCommands(BUILTIN_SLASH_COMMANDS).filter((command) =>
       isExperimentalFlagEnabled(command.experimentalFlag),
     );
-    return [...builtins, ...this.skillCommands, ...this.pluginCommands];
+    return [...builtins, ...this.aliasCommands, ...this.skillCommands, ...this.pluginCommands];
   }
 
   private setupAutocomplete(): void {
@@ -588,6 +592,47 @@ export class KimiTUI {
     for (const [commandName, body] of pluginSlashCommands.commandMap) {
       this.pluginCommandMap.set(commandName, body);
     }
+    this.setupAutocomplete();
+  }
+
+  // =========================================================================
+  // User aliases ([aliases] in config.toml)
+  // =========================================================================
+
+  async refreshAliases(): Promise<void> {
+    try {
+      const config = await this.harness.getConfig();
+      this.applyAliases(config.aliases);
+    } catch {
+      // Config RPC unavailable (e.g. very early startup) — leave whatever
+      // aliases were already loaded; `/reload` will retry.
+    }
+  }
+
+  private applyAliases(rawAliases: Readonly<Record<string, string>> | undefined): void {
+    this.aliasMap.clear();
+    if (rawAliases === undefined) {
+      this.aliasCommands = [];
+      this.setupAutocomplete();
+      return;
+    }
+    const commands: KimiSlashCommand[] = [];
+    for (const [name, expansion] of Object.entries(rawAliases)) {
+      const key = name.startsWith('/') ? name.slice(1) : name;
+      if (key.length === 0) continue;
+      this.aliasMap.set(key, expansion);
+      // Surface each alias in autocomplete under its slash name with no
+      // secondary aliases (the expansion target is already shown by its own
+      // command). The `description` makes the alias-vs-real-command split
+      // obvious in the picker.
+      commands.push({
+        name: key,
+        aliases: [],
+        description: `alias: ${expansion}`,
+        priority: 0,
+      } satisfies KimiSlashCommand);
+    }
+    this.aliasCommands = commands;
     this.setupAutocomplete();
   }
 
@@ -814,6 +859,7 @@ export class KimiTUI {
     if (this.session !== undefined) {
       this.updateTerminalTitle();
     }
+    void this.refreshAliases();
     void this.refreshSkillCommands(this.session);
     void this.refreshPluginCommands(this.session);
   }
@@ -2272,6 +2318,7 @@ export class KimiTUI {
       return undefined;
     }
     try {
+      await this.refreshAliases();
       await this.refreshSkillCommands(session);
       await this.refreshPluginCommands(session);
     } catch {
@@ -2581,6 +2628,7 @@ export class KimiTUI {
     await this.syncRuntimeState(session);
     this.updateTerminalTitle();
     try {
+      await this.refreshAliases();
       await this.refreshSkillCommands(this.session);
       await this.refreshPluginCommands(this.session);
     } catch {
@@ -2620,6 +2668,7 @@ export class KimiTUI {
     await this.syncRuntimeState(session);
     this.updateTerminalTitle();
     try {
+      await this.refreshAliases();
       await this.refreshSkillCommands(session);
       await this.refreshPluginCommands(session);
     } catch {
@@ -2662,6 +2711,7 @@ export class KimiTUI {
       return;
     }
     try {
+      await this.refreshAliases();
       await this.refreshSkillCommands(this.session);
       await this.refreshPluginCommands(this.session);
     } catch {

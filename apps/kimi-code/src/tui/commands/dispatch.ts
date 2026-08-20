@@ -44,6 +44,7 @@ import {
 } from './config';
 import { handleGoalCommand } from './goal';
 import { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
+import { handleAliasCommand } from './alias';
 import { handleAddDirCommand } from './add-dir';
 import { parseSlashInput } from './parse';
 import { handlePluginsCommand } from './plugins';
@@ -135,6 +136,12 @@ export interface SlashCommandHost {
   restoreInputText(text: string): void;
   refreshSlashCommandAutocomplete(): void;
   /**
+   * Re-read `[aliases]` from config.toml and repopulate the in-memory alias
+   * map. Triggered by `/alias <set>` after a config write so the new alias
+   * takes effect without restarting the TUI.
+   */
+  refreshAliases(): Promise<void>;
+  /**
    * Rebuild the plugin slash-command list. With no session (v2 session-less
    * startup) this reads the app-global plugin commands instead, so `/plugins`
    * mutations apply before the first session exists.
@@ -211,6 +218,12 @@ export interface SlashCommandHost {
   ): void;
   readonly skillCommandMap: Map<string, string>;
   readonly pluginCommandMap: Map<string, string>;
+  /**
+   * User-defined `[aliases]` from config.toml. Lazily resolved by the host so
+   * that changes via `/reload` (which mutates the runtime config) are picked
+   * up without restarting the TUI.
+   */
+  readonly aliasMap: Map<string, string>;
 
   // Controller refs
   readonly streamingUI: StreamingUIController;
@@ -267,6 +280,7 @@ function dispatchInlineSkillCombo(host: SlashCommandHost, text: string): boolean
     input: text,
     skillCommandMap: host.skillCommandMap,
     pluginCommandMap: host.pluginCommandMap,
+    aliasMap: host.aliasMap,
     isStreaming: false,
     isCompacting: false,
   });
@@ -304,6 +318,7 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
     input,
     skillCommandMap: host.skillCommandMap,
     pluginCommandMap: host.pluginCommandMap,
+    aliasMap: host.aliasMap,
     isStreaming: host.state.appState.streamingPhase !== 'idle',
     isCompacting: host.state.appState.isCompacting,
   });
@@ -554,6 +569,9 @@ async function handleBuiltInSlashCommand(
       return;
     case 'feedback':
       await handleFeedbackCommand(host);
+      return;
+    case 'alias':
+      await handleAliasCommand(host, args);
       return;
     case 'btw':
       await handleBtwCommand(host, args);

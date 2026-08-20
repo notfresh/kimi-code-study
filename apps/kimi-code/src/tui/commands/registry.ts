@@ -348,6 +348,14 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'always',
   },
   {
+    name: 'alias',
+    aliases: ['aliases'],
+    description: 'List or set user-defined slash-command aliases',
+    priority: 60,
+    argumentHint: '[/<name> "<expansion>"]',
+    availability: 'always',
+  },
+  {
     name: 'undo',
     aliases: [],
     description: 'Withdraw the last prompt from the transcript',
@@ -428,6 +436,28 @@ export function findBuiltInSlashCommand(commandName: string): BuiltinSlashComman
   return commands.find(
     (command) => command.name === commandName || command.aliases.includes(commandName),
   ) as BuiltinSlashCommand | undefined;
+}
+
+/**
+ * Resolve a user-defined alias (from `[aliases]` in config.toml) against a
+ * parsed slash input. Returns the rewritten input (`/<expansion> <args>`) or
+ * null when no alias matches. Expansion is git-style: the user's trailing
+ * args are appended to the alias body verbatim.
+ *
+ * The key in `aliases` is stored without the leading "/" — this matches the
+ * slash parser's `name` field and keeps TOML keys clean.
+ */
+export function applyUserAlias(
+  aliasMap: ReadonlyMap<string, string> | undefined,
+  parsedName: string,
+  args: string,
+): string | null {
+  if (aliasMap === undefined) return null;
+  const target = aliasMap.get(parsedName);
+  if (target === undefined) return null;
+  const expanded = target.startsWith('/') ? target : `/${target}`;
+  const trimmedArgs = args.trim();
+  return trimmedArgs.length > 0 ? `${expanded} ${trimmedArgs}` : expanded;
 }
 
 export function resolveSlashCommandAvailability(

@@ -1,5 +1,6 @@
 import {
   findBuiltInSlashCommand,
+  applyUserAlias,
   resolveSlashCommandAvailability,
   type BuiltinSlashCommand,
   type BuiltinSlashCommandName,
@@ -49,6 +50,13 @@ export interface ResolveSlashCommandInput {
   readonly input: string;
   readonly skillCommandMap: ReadonlyMap<string, string>;
   readonly pluginCommandMap: ReadonlyMap<string, string>;
+  /**
+   * User-defined aliases from `[aliases]` in config.toml. Keys are slash
+   * command names without the leading "/", values are the expansion target
+   * (also without leading "/"). When the user types `/<key> <args>`, the
+   * input is rewritten to `/<value> <args>` and re-parsed — git-style.
+   */
+  readonly aliasMap?: ReadonlyMap<string, string>;
   readonly isStreaming: boolean;
   readonly isCompacting: boolean;
 }
@@ -56,6 +64,20 @@ export interface ResolveSlashCommandInput {
 export function resolveSlashCommandInput(options: ResolveSlashCommandInput): SlashCommandIntent {
   const parsed = parseSlashInput(options.input);
   if (parsed === null) return { kind: 'not-command' };
+
+  // User-defined aliases: rewrite the input and re-parse exactly once. The
+  // re-parsed result is NOT re-fed through the alias map — this prevents the
+  // user from accidentally creating `a → b → a` cycles that would stack-overflow
+  // the resolver. (git alias itself has no such guard; we add one because the
+  // kimi resolver is on a tighter event-loop budget than git's shell exec.)
+  const rewritten = applyUserAlias(options.aliasMap, parsed.name, parsed.args);
+  if (rewritten !== null) {
+    return resolveSlashCommandInput({
+      ...options,
+      input: rewritten,
+      aliasMap: undefined,
+    });
+  }
 
   const command = findBuiltInSlashCommand(parsed.name);
   // `command` is a literal union where only some members carry `experimentalFlag`; widen to read it.
