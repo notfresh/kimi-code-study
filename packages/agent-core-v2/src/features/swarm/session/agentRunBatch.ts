@@ -1,10 +1,11 @@
-import { isProviderRateLimitError } from '#/kosong/contract/errors';
-import { type TokenUsage } from '#/kosong/contract/usage';
+import { isProviderRateLimitError } from '#/llm-adapter/contract/errors';
+import { type TokenUsage } from '#human/llm/usage';
 import * as retry from 'retry';
 
 import { isUserCancellation } from '#/_base/utils/abort';
 import { setClampedTimeout } from '#/_base/utils/timer';
 import { BugIndicatingError, Error2, ErrorCodes } from '#/errors';
+import type { SubagentSpawnPlan } from '#/session/subagent/spawn';
 import type { SessionSwarmRunResult, SessionSwarmTask } from './sessionSwarm';
 
 export interface AgentRunAttemptOptions {
@@ -22,7 +23,7 @@ export interface AgentRunAttemptOptions {
 export interface AgentSpawnAttemptOptions extends AgentRunAttemptOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
-  readonly binding?: { readonly model: string; readonly thinking?: string };
+  readonly plan: SubagentSpawnPlan;
 }
 
 export type AgentRunAttemptHandle = {
@@ -31,6 +32,7 @@ export type AgentRunAttemptHandle = {
   readonly completion: Promise<{
     readonly result: string;
     readonly usage?: TokenUsage;
+    readonly stopReason?: string;
   }>;
 };
 
@@ -56,11 +58,19 @@ export type AgentRunSuspendedEvent = {
   readonly reason: string;
 };
 
+export type AgentRunAbandonedEvent = {
+  readonly task: QueuedAgentRunTask;
+  readonly agentId: string;
+  readonly outcome: 'cancelled' | 'failed';
+  readonly error?: string;
+};
+
 export type AgentRunBatchLauncher = {
   spawn(options: AgentSpawnAttemptOptions): Promise<AgentRunAttemptHandle>;
   resume(agentId: string, options: AgentRunAttemptOptions): Promise<AgentRunAttemptHandle>;
   retry(agentId: string, options: AgentRunAttemptOptions): Promise<AgentRunAttemptHandle>;
   suspended?(event: AgentRunSuspendedEvent): void;
+  abandoned?(event: AgentRunAbandonedEvent): void;
 };
 
 type RateLimitedOutcome = {
@@ -292,7 +302,7 @@ export class AgentRunBatch<T> {
         const spawnOptions: AgentSpawnAttemptOptions = {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
-          binding: task.binding,
+          plan: task.plan,
           ...runOptions,
         };
         handle = await this.launcher.spawn(spawnOptions);
@@ -310,6 +320,7 @@ export class AgentRunBatch<T> {
         status: 'completed',
         result: completion.result,
         usage: completion.usage,
+        stopReason: completion.stopReason,
       };
     } catch (error) {
       if (isProviderRateLimitError(error)) {
@@ -361,6 +372,12 @@ export class AgentRunBatch<T> {
     if ('status' in outcome) {
       this.results[attempt.state.index] = outcome;
     } else if (this.isOnlyUnfinishedTask(attempt.state)) {
+      this.launcher.abandoned?.({
+        task: attempt.state.task,
+        agentId: outcome.agentId,
+        outcome: 'failed',
+        error: outcome.error,
+      });
       this.results[attempt.state.index] = {
         task: attempt.state.task,
         agentId: outcome.agentId,
@@ -521,6 +538,7 @@ export class AgentRunBatch<T> {
 
   private finishWithUserCancellation(): void {
     if (this.finished) return;
+    this.abandonSuspended();
 
     this.finish(
       this.states.map((state) => {
@@ -558,9 +576,23 @@ export class AgentRunBatch<T> {
 
   private fail(error: unknown): void {
     if (this.finished) return;
+    this.abandonSuspended();
     this.finished = true;
     this.cleanup();
     this.reject?.(error);
+  }
+
+  private abandonSuspended(): void {
+    for (const state of this.pending) {
+      if (state.agentId === undefined) continue;
+      this.launcher.abandoned?.({ task: state.task, agentId: state.agentId, outcome: 'cancelled' });
+    }
+    for (const attempt of this.active) {
+      if (attempt.ready) continue;
+      const agentId = attempt.state.agentId;
+      if (agentId === undefined) continue;
+      this.launcher.abandoned?.({ task: attempt.state.task, agentId, outcome: 'cancelled' });
+    }
   }
 
   private cleanup(): void {
@@ -595,7 +627,7 @@ export class AgentRunBatch<T> {
         ? undefined
         : setClampedTimeout(() => {
             attempt.timedOut = true;
-            attempt.controller.abort(new Error('Aborted'));
+            attempt.controller.abort(new Error('Subagent timed out.'));
           }, task.timeout);
 
     if (this.controller.signal.aborted) {

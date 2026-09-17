@@ -1,13 +1,12 @@
 import { IOAuthService, type Scope } from '@moonshot-ai/agent-core-v2';
 import {
-  managedUserInfoResultSchema,
   managedUsageResultSchema,
+  managedUserInfoResultSchema,
   oauthFlowSnapshotSchema,
   oauthFlowStartSchema,
   oauthLoginCancelResponseSchema,
   oauthLogoutResponseSchema,
-  type ManagedUsageResult,
-  type UsageRow,
+  oauthRegionResultSchema,
 } from '@moonshot-ai/agent-core-v2/app/auth/oauthProtocol';
 import { z } from 'zod';
 
@@ -63,7 +62,9 @@ export function registerOAuthRoutes(app: RouteHost, core: Scope): void {
       tags: ['auth'],
     },
     async (req, reply) => {
-      const result = await core.accessor.get(IOAuthService).startLogin(req.body.provider);
+      const result = await core.accessor
+        .get(IOAuthService)
+        .startLogin(req.body.provider, { region: req.body.region });
       requestLog(req)?.info({ provider: req.body.provider, action: 'login' }, 'oauth login started');
       reply.send(okEnvelope(result, req.id));
     },
@@ -150,7 +151,7 @@ export function registerOAuthRoutes(app: RouteHost, core: Scope): void {
     },
     async (req, reply) => {
       const result = await core.accessor.get(IOAuthService).getManagedUsage(req.query.provider);
-      reply.send(okEnvelope(toWireUsage(result), req.id));
+      reply.send(okEnvelope(result, req.id));
     },
   );
   app.get(
@@ -178,45 +179,23 @@ export function registerOAuthRoutes(app: RouteHost, core: Scope): void {
     userInfoRoute.options,
     userInfoRoute.handler as Parameters<RouteHost['get']>[2],
   );
-}
 
-function toWireUsage(result: ManagedUsageDomainResult): ManagedUsageResult {
-  if (result.kind === 'error') {
-    return { kind: 'error', message: result.message, status: result.status };
-  }
-  return {
-    kind: 'ok',
-    summary: result.summary === null ? null : toWireUsageRow(result.summary),
-    limits: result.limits.map(toWireUsageRow),
-    extra_usage:
-      result.extraUsage === null
-        ? null
-        : {
-            balance_cents: result.extraUsage.balanceCents,
-            total_cents: result.extraUsage.totalCents,
-            monthly_charge_limit_enabled: result.extraUsage.monthlyChargeLimitEnabled,
-            monthly_charge_limit_cents: result.extraUsage.monthlyChargeLimitCents,
-            monthly_used_cents: result.extraUsage.monthlyUsedCents,
-            currency: result.extraUsage.currency,
-          },
-  };
-}
-
-type ManagedUsageDomainResult = Awaited<ReturnType<IOAuthService['getManagedUsage']>>;
-type DomainUsageRow = {
-  name?: string;
-  window?: { duration: number; unit: 'minute' | 'hour' | 'day' | 'week' };
-  used: number;
-  limit: number;
-  resetAt?: string;
-};
-
-function toWireUsageRow(row: DomainUsageRow): UsageRow {
-  return {
-    name: row.name,
-    window: row.window,
-    used: row.used,
-    limit: row.limit,
-    reset_at: row.resetAt,
-  };
+  const regionRoute = defineRoute(
+    {
+      method: 'GET',
+      path: '/oauth/region',
+      success: { data: oauthRegionResultSchema },
+      description: 'Resolve the client region (mainland-cn/global)',
+      tags: ['auth'],
+    },
+    async (req, reply) => {
+      const region = core.accessor.get(IOAuthService).getRegion();
+      reply.send(okEnvelope({ region }, req.id));
+    },
+  );
+  app.get(
+    regionRoute.path,
+    regionRoute.options,
+    regionRoute.handler as Parameters<RouteHost['get']>[2],
+  );
 }

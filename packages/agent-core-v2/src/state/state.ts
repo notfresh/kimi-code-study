@@ -1,4 +1,4 @@
-import { enableMapSet, enablePatches, type Draft, type Patch } from 'immer';
+import { enableMapSet, type Draft } from 'immer';
 import type { z } from 'zod';
 
 import { BugIndicatingError } from '#/_base/errors/errors';
@@ -9,7 +9,6 @@ import type { PartsTransformer, RecordDehydrator } from '#/wire/record';
 import { StateError, StateErrors } from './errors';
 
 enableMapSet();
-enablePatches();
 
 export type { StateKey } from '#/_base/state/stateRegistry';
 export type { PartsTransformer } from '#/wire/record';
@@ -32,13 +31,6 @@ export type StateFold<S, E extends Event2<any> = Event2<any>> = (
   event: E,
   ctx: FoldContext,
 ) => S | void;
-
-export interface PatchEntry {
-  readonly id: number;
-  readonly eventType: string;
-  readonly patches: readonly Patch[];
-  readonly inversePatches: readonly Patch[];
-}
 
 export interface ReplayableOptions<S> {
   readonly schema: z.ZodType<S>;
@@ -168,13 +160,6 @@ export function registerUndoableProtocol(protocol: UndoableProtocol): void {
   }
 }
 
-export function keepsUndoCheckpoints(
-  key: ReplayableStateKey<any>,
-): boolean {
-  const undoable = key.replayable.undoable;
-  return undoable !== undefined && undoable.onUndo === undefined;
-}
-
 export function expandedStateFolds(
   key: ReplayableStateKey<any>,
 ): ReadonlyMap<Event2Class<any, any>, StateFold<any, any>> {
@@ -218,6 +203,96 @@ export function expandedStateFolds(
     ctx.undoToCheckpoint(event.count);
   });
   return folds;
+}
+
+export type EventApplier = (event: any, ctx: FoldContext) => void;
+
+export function expandedModelAppliers(
+  owner: string,
+  undoable: boolean,
+  appliers: ReadonlyMap<Event2Class<any, any>, EventApplier>,
+  onUndo: ((count: number) => void) | undefined,
+): ReadonlyMap<Event2Class<any, any>, EventApplier> {
+  if (!undoable) return appliers;
+  if (undoableProtocol === undefined) {
+    throw new BugIndicatingError(
+      `Agent model '${owner}' is undoable but no undoable protocol is registered ` +
+        '(the contextMemory domain registers it at import time)',
+    );
+  }
+  const protocol = undoableProtocol;
+  if (appliers.has(protocol.events.undo)) {
+    throw new BugIndicatingError(
+      `Undoable agent model '${owner}' must not apply the undo event itself; ` +
+        'override onUndo on the model to customize the rollback',
+    );
+  }
+  const custom = onUndo !== undefined;
+  const expanded = new Map<Event2Class<any, any>, EventApplier>(appliers);
+  const domainAppend = expanded.get(protocol.events.appendMessage);
+  expanded.set(protocol.events.appendMessage, (event, ctx) => {
+    if (!custom && protocol.isUndoAnchor(event.message)) {
+      ctx.checkpoint();
+      return;
+    }
+    domainAppend?.(event, ctx);
+  });
+  for (const cls of [protocol.events.applyCompaction, protocol.events.clear]) {
+    const domain = expanded.get(cls);
+    expanded.set(cls, (event, ctx) => {
+      ctx.clearCheckpoints();
+      domain?.(event, ctx);
+    });
+  }
+  expanded.set(protocol.events.undo, (event, ctx) => {
+    if (!protocol.isValidUndoCount(event.count)) return;
+    if (onUndo !== undefined) {
+      onUndo(event.count);
+      return;
+    }
+    ctx.undoToCheckpoint(event.count);
+  });
+  return expanded;
+}
+
+export function expandedRuntimeFolds(
+  owner: string,
+  undoable: boolean,
+  folds: ReadonlyMap<Event2Class<any, any>, StateFold<any, any>>,
+): ReadonlyMap<Event2Class<any, any>, StateFold<any, any>> {
+  if (!undoable) return folds;
+  if (undoableProtocol === undefined) {
+    throw new BugIndicatingError(
+      `Agent runtime '${owner}' is undoable but no undoable protocol is registered ` +
+        '(the contextMemory domain registers it at import time)',
+    );
+  }
+  const protocol = undoableProtocol;
+  if (folds.has(protocol.events.undo)) {
+    throw new BugIndicatingError(
+      `Undoable agent runtime '${owner}' must not fold the undo event itself`,
+    );
+  }
+  const expanded = new Map(folds);
+  const domainAppend = expanded.get(protocol.events.appendMessage);
+  expanded.set(protocol.events.appendMessage, (state, event, ctx) => {
+    if (protocol.isUndoAnchor(event.message)) {
+      ctx.checkpoint();
+      return;
+    }
+    return domainAppend?.(state, event, ctx);
+  });
+  for (const cls of [protocol.events.applyCompaction, protocol.events.clear]) {
+    const domain = expanded.get(cls);
+    expanded.set(cls, (state, event, ctx) => {
+      ctx.clearCheckpoints();
+      return domain?.(state, event, ctx);
+    });
+  }
+  expanded.set(protocol.events.undo, (_state, event, ctx) => {
+    if (protocol.isValidUndoCount(event.count)) ctx.undoToCheckpoint(event.count);
+  });
+  return expanded;
 }
 
 export type DeepReadonly<T> = T extends (...args: infer A) => infer R

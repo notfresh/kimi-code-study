@@ -1,17 +1,18 @@
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { LifecycleScope } from '#/app/scopes';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import type { ContextMessage } from '#/agent/contextMemory/types';
-import { IAgentPromptService } from '#/agent/prompt/prompt';
+import type { ContextMessage, PromptOrigin } from '#/agent/contextMemory/types';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import {
   promptMetadataTextFromContentParts,
   promptMetadataTextFromText,
 } from '#/agent/prompt/promptMetadataText';
-import type { ContentPart } from '#/kosong/contract/message';
+import type { ContentPart } from '#human/llm/message';
 
 import {
   IAgentTitlePromptSource,
   type TitleDigestExcerpt,
+  type TitleDigestTurn,
   type TitleTurnExcerpt,
 } from './agentTitlePromptSource';
 
@@ -20,7 +21,7 @@ export class AgentTitlePromptSourceService implements IAgentTitlePromptSource {
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
-    @IAgentPromptService private readonly prompt: IAgentPromptService,
+    @IAgentLoopService private readonly loop: IAgentLoopService,
   ) {}
 
   async firstUserPrompts(limit: number): Promise<readonly string[]> {
@@ -58,31 +59,46 @@ export class AgentTitlePromptSourceService implements IAgentTitlePromptSource {
 
   async digestExcerpt(): Promise<TitleDigestExcerpt> {
     const all = this.combinedMessages();
-    const firstUserIndex = all.findIndex(isNaturalLanguagePrompt);
-    if (firstUserIndex < 0) return {};
-    let lastUserIndex = -1;
-    for (let index = all.length - 1; index >= 0; index--) {
-      if (isNaturalLanguagePrompt(all[index]!)) {
-        lastUserIndex = index;
-        break;
+    const seenMessageIds = new Set<string>();
+    const userIndexes: number[] = [];
+    for (let index = 0; index < all.length; index++) {
+      const message = all[index]!;
+      if (!isNaturalLanguagePrompt(message)) continue;
+      if (message.id !== undefined) {
+        if (seenMessageIds.has(message.id)) continue;
+        seenMessageIds.add(message.id);
       }
+      userIndexes.push(index);
     }
-    const firstUser = promptMetadataTextFromUserMessage(all[firstUserIndex]!);
-    const lastUser =
-      lastUserIndex > firstUserIndex
-        ? promptMetadataTextFromUserMessage(all[lastUserIndex]!)
-        : undefined;
-    const assistant =
-      finalAssistantText(all.slice(lastUserIndex + 1)) ??
-      finalAssistantText(all.slice(firstUserIndex + 1));
-    return { firstUser, lastUser, assistant };
+    const turns: TitleDigestTurn[] = [];
+    for (let i = 0; i < userIndexes.length; i++) {
+      const userIndex = userIndexes[i]!;
+      const user = promptMetadataTextFromUserMessage(all[userIndex]!);
+      if (user === undefined) continue;
+      const spanEnd = i + 1 < userIndexes.length ? userIndexes[i + 1]! : all.length;
+      const assistant = finalAssistantText(all.slice(userIndex + 1, spanEnd));
+      turns.push({ user, assistant });
+    }
+    return { turns };
   }
 
   private combinedMessages(): ContextMessage[] {
-    const queue = this.prompt.list();
+    const snapshot = this.loop.snapshot();
     const all = [...this.context.get()];
-    if (queue.active !== undefined) all.push(queue.active.message);
-    for (const item of queue.pending) all.push(item.message);
+    const activeHandle =
+      snapshot.activePromptId === undefined
+        ? undefined
+        : this.loop.promptHandle(snapshot.activePromptId);
+    if (activeHandle !== undefined) all.push(activeHandle.message);
+    for (const item of snapshot.queue) {
+      if (item.meta?.tracked !== true) continue;
+      all.push({
+        role: 'user',
+        content: [...item.message.content],
+        toolCalls: [],
+        origin: item.meta?.origin as PromptOrigin | undefined,
+      });
+    }
     return all;
   }
 }
@@ -97,6 +113,7 @@ function promptMetadataTextFromUserMessage(message: ContextMessage): string | un
   const bundled = message.origin?.kind === 'user' ? (message.origin.skillActivations?.length ?? 0) : 0;
   return promptMetadataTextFromContentParts(
     bundled === 0 ? message.content : message.content.slice(bundled),
+    message.origin?.kind === 'user' ? message.origin.clientMetadata : undefined,
   );
 }
 

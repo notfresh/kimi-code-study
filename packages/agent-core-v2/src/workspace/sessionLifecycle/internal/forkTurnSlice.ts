@@ -1,5 +1,6 @@
 import { Error2, ErrorCodes } from '#/errors';
-import type { ContentPart } from '#/kosong/contract/message';
+import { FILE_HISTORY_RECORD_PREFIX } from '#/features/fileHistory/fileHistoryOps';
+import type { ContentPart } from '#human/llm/message';
 import {
   promptMetadataTextFromContentParts,
   promptMetadataTextFromText,
@@ -45,7 +46,9 @@ export function sliceMainRecordsAtTurn(
   const retained = records
     .slice(0, end)
     .filter(
-      (record, index) => !isUserVisibleTurnInputRecord(record) || retainedTurnInputs.has(index),
+      (record, index) =>
+        !record.type.startsWith(FILE_HISTORY_RECORD_PREFIX) &&
+        (!isUserVisibleTurnInputRecord(record) || retainedTurnInputs.has(index)),
     );
   const cutoffTimes = retained
     .map(recordTime)
@@ -190,7 +193,7 @@ function promptMetadataFromTurnRecord(record: WireRecord): string | undefined {
   if (origin?.['kind'] === 'skill_activation') {
     const name = origin['skillName'];
     if (typeof name !== 'string') return undefined;
-    return promptMetadataTextFromText(slashCommandText(`/${name}`, origin['skillArgs']));
+    return promptMetadataTextFromContentParts([{ type: 'text', text: slashCommandText(`/${name}`, origin['skillArgs']) }], origin['clientMetadata']);
   }
   if (origin?.['kind'] === 'plugin_command') {
     const pluginId = origin['pluginId'];
@@ -206,6 +209,7 @@ function promptMetadataFromTurnRecord(record: WireRecord): string | undefined {
   const bundled = origin?.['kind'] === 'user' && Array.isArray(activations) ? activations.length : 0;
   return promptMetadataTextFromContentParts(
     (bundled === 0 ? content : content.slice(bundled)) as readonly ContentPart[],
+    origin?.['kind'] === 'user' ? origin['clientMetadata'] : undefined,
   );
 }
 

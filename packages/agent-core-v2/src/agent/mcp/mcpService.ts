@@ -2,21 +2,22 @@ import { createHash } from 'node:crypto';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/state/state';
-import type { Tool as KosongTool } from '#/kosong/contract/tool';
+import type { ToolDescription as KosongTool } from '#human/llm/message';
 
 import { type IDisposable } from "#/_base/di/lifecycle";
 import { Service } from "#/_base/di/service";
 import { ErrorCodes, makeErrorPayload } from "#/errors";
 import { abortable } from '#/_base/utils/abort';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import { sessionMediaOriginalsDir } from '#/agent/media/image-originals';
+import { ISessionMediaStore } from '#/agent/media/sessionMediaStore';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { createMcpAuthTool } from '#/agent/mcp/tools/auth';
 import { createMcpTool } from '#/agent/mcp/tools/mcp';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMcpHandle } from '#/session/mcp/sessionMcpHandle';
 import type { McpServerEntry } from '#/mcpCore/connection-manager';
 import { IAgentMcpService } from './mcp';
@@ -51,13 +52,15 @@ export class AgentMcpService extends Service implements IAgentMcpService {
 
   constructor(
     @ISessionMcpHandle private readonly mcpHandle: ISessionMcpHandle,
-    @ISessionContext private readonly sessionContext: ISessionContext,
     @IAgentToolRegistryService private readonly registry: IAgentToolRegistryService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IAgentLoopService loop: IAgentLoopService,
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
+    @ISessionMediaStore private readonly attachmentStore: ISessionMediaStore,
   ) {
     super();
     this.states.contributeState(mcpDiscoveryKey);
@@ -166,6 +169,7 @@ export class AgentMcpService extends Service implements IAgentMcpService {
     if (!this.mcpHandle.isBaselineServer(entry.name)) return;
     void this.dispatcher.dispatch(
       new McpServerStatus({
+        agentId: this.scopeContext.agentId,
         server: {
           name: entry.name,
           transport: entry.transport,
@@ -191,6 +195,7 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       if (removed) {
         void this.dispatcher.dispatch(
           new ToolListUpdated({
+            agentId: this.scopeContext.agentId,
             reason: 'mcp.disconnected',
             serverName: entry.name,
           }),
@@ -207,11 +212,13 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       resolved.client,
       resolved.tools,
       resolved.enabledNames,
+      resolved.deferred,
     );
     this.emitMcpToolCollisions(entry.name, result.collisions);
     this.recordDiscovery(entry.name, resolved.rawTools, resolved.enabledNames, result.collisions);
     void this.dispatcher.dispatch(
       new ToolListUpdated({
+        agentId: this.scopeContext.agentId,
         reason: 'mcp.connected',
         serverName: entry.name,
       }),
@@ -229,11 +236,18 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       oauthService,
       reconnect: (signal) => this.reconnect(entry.name, signal),
     });
-    const disposable = this._register(this.registry.register(tool, { source: 'mcp' }));
+    const deferred = this.mcpHandle.connectionManager.configOf(entry.name)?.deferred === true;
+    const disposable = this._register(
+      this.registry.register(tool, {
+        source: 'mcp',
+        disclosure: deferred ? 'deferred' : 'inline',
+      }),
+    );
     this.mcpTools.set(tool.name, { disposable, serverName: entry.name });
     this.mcpToolsByServer.set(entry.name, [tool.name]);
     void this.dispatcher.dispatch(
       new ToolListUpdated({
+        agentId: this.scopeContext.agentId,
         reason: 'mcp.connected',
         serverName: entry.name,
       }),
@@ -245,6 +259,7 @@ export class AgentMcpService extends Service implements IAgentMcpService {
     client: MCPClient,
     tools: readonly KosongTool[],
     enabledTools: ReadonlySet<string>,
+    deferred: boolean,
   ): {
     readonly registered: readonly string[];
     readonly collisions: readonly McpToolCollision[];
@@ -278,13 +293,17 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       const disposable = this._register(
         this.registry.register(
           createMcpTool(qualified, tool, client, {
-            originalsDir: sessionMediaOriginalsDir(this.sessionContext.sessionDir),
+            serverName,
+            attachmentStore: this.attachmentStore,
             telemetry: this.telemetry,
+            providerType: () => this.profile.getModelProviderType(),
             reconnect: (signal) => this.reconnectForToolCall(serverName, client, signal),
             isRemoved: () =>
               this.mcpHandle.connectionManager.get(serverName)?.status === 'removed',
+            onUnauthorized: (error, failedClient) =>
+              this.mcpHandle.connectionManager.markNeedsAuth(serverName, error, failedClient),
           }),
-          { source: 'mcp' },
+          { source: 'mcp', disclosure: deferred ? 'deferred' : 'inline' },
         ),
       );
       this.mcpTools.set(qualified, { disposable, serverName });
@@ -321,6 +340,7 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       if (this.states.get(mcpDiscoveryKey).seen.includes(key)) return;
       void this.dispatcher.dispatch(
         new McpToolsDiscovered({
+          agentId: this.scopeContext.agentId,
           serverName,
           hash,
           tools: rawTools,
@@ -357,15 +377,16 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       )
       .join('; ');
     void this.dispatcher.dispatch(
-      new AgentErrorEvent(
-        makeErrorPayload(
+      new AgentErrorEvent({
+        ...makeErrorPayload(
           ErrorCodes.MCP_TOOL_NAME_COLLISION,
           `MCP server "${serverName}" registered ${collisions.length} tool name` +
             `${collisions.length === 1 ? '' : 's'} ` +
             `that collide with existing qualified names; the losing tools were dropped: ${summary}`,
           { details: { serverName, collisions: collisions as readonly unknown[] } },
         ),
-      ),
+        agentId: this.scopeContext.agentId,
+      }),
     );
   }
 }
